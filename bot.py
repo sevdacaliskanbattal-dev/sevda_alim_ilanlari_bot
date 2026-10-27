@@ -7,6 +7,18 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 DB_FILE = "sent_jobs.json"
 
+# İlgisiz başlıkları ve haberleri elenecek kara liste
+EXCLUDE_WORDS = [
+    "yazılım", "lisansı alımı", "ihale", "konferans", "programı'na katıldı", 
+    "duyuru", "haber", "istatistik", "mevzuat", "kurum dışı kamu", "çözümü lisansı"
+]
+
+# Gerçek işe alımı temsil eden kelimeler
+INCLUDE_WORDS = [
+    "lisans", "kpss", "ziraat", "mühendis", "memur alımı", "personel alımı", 
+    "sözleşmeli personel", "uzman yardımcısı", "müfettiş yardımcısı", "zabıta", "büro personeli"
+]
+
 def load_sent_jobs():
     if os.path.exists(DB_FILE):
         try:
@@ -33,104 +45,104 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram hatası: {e}")
 
-def scrape_site(url, site_name, parser_type="html.parser"):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+def is_valid_job(title):
+    title_lower = title.lower()
+    
+    # Kara listedeki kelimeler varsa direkt ele
+    if any(ex in title_lower for ex in EXCLUDE_WORDS):
+        return False
+        
+    # Aradığımız iş/lisans kelimeleri varsa kabul et
+    if any(inc in title_lower for inc in INCLUDE_WORDS):
+        return True
+        
+    return False
+
+def scrape_sbb():
+    """SBB Kamu İlan Portalı"""
+    jobs = []
+    url = "https://kamuilan.sbb.gov.tr/"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         resp.encoding = 'utf-8'
-        return BeautifulSoup(resp.text, parser_type)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        for a in soup.find_all("a", href=True):
+            text = a.get_text(strip=True)
+            link = a["href"]
+            
+            # Sadece gerçek ilan detay linkleri ve geçerli ilanlar
+            if is_valid_job(text) and len(text) > 15:
+                if not link.startswith("http"):
+                    link = "https://kamuilan.sbb.gov.tr/" + link.lstrip("/")
+                jobs.append((f"🏛️ <b>SBB Kamu İlan</b>\n\n📌 {text}\n\n🔗 <a href='{link}'>İlan Detayı</a>", link))
     except Exception as e:
-        print(f"{site_name} bağlantı hatası: {e}")
-        return None
+        print(f"SBB hatası: {e}")
+    return jobs
+
+def scrape_resmi_gazete():
+    """Resmî Gazete Çeşitli İlanlar"""
+    jobs = []
+    url = "https://www.resmigazete.gov.tr/"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.encoding = 'utf-8'
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        for a in soup.find_all("a", href=True):
+            text = a.get_text(strip=True)
+            link = a["href"]
+            
+            if "ilan" in link.lower() and is_valid_job(text) and len(text) > 15:
+                if not link.startswith("http"):
+                    link = "https://www.resmigazete.gov.tr/" + link.lstrip("/")
+                jobs.append((f"📜 <b>Resmî Gazete İlanı</b>\n\n📌 {text}\n\n🔗 <a href='{link}'>İlan Detayı</a>", link))
+    except Exception as e:
+        print(f"Resmi Gazete hatası: {e}")
+    return jobs
+
+def scrape_ilan_gov():
+    """İlan.gov.tr Personel Alımı"""
+    jobs = []
+    url = "https://www.ilan.gov.tr/kategori/personel-alimi"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.encoding = 'utf-8'
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        for a in soup.find_all("a", href=True):
+            text = a.get_text(strip=True)
+            link = a["href"]
+            
+            if "/detail/" in link or "/ilan/" in link:
+                if is_valid_job(text) and len(text) > 15:
+                    if not link.startswith("http"):
+                        link = "https://www.ilan.gov.tr" + link
+                    jobs.append((f"📢 <b>İlan.gov.tr</b>\n\n📌 {text}\n\n🔗 <a href='{link}'>İlan Detayı</a>", link))
+    except Exception as e:
+        print(f"İlan.gov.tr hatası: {e}")
+    return jobs
 
 def check_all_sources():
     sent_jobs = load_sent_jobs()
+    all_jobs = []
+    
+    all_jobs.extend(scrape_sbb())
+    all_jobs.extend(scrape_resmi_gazete())
+    all_jobs.extend(scrape_ilan_gov())
+    
     new_jobs_count = 0
-
-    # 1. SBB Kamu İlan
-    soup = scrape_site("https://kamuilan.sbb.gov.tr/", "SBB Kamu İlan")
-    if soup:
-        for a in soup.find_all("a", href=True):
-            text = a.get_text(strip=True)
-            link = a["href"]
-            if not link.startswith("http"):
-                link = "https://kamuilan.sbb.gov.tr/" + link.lstrip("/")
+    for msg, link in all_jobs:
+        if link not in sent_jobs:
+            send_telegram(msg)
+            sent_jobs.add(link)
+            new_jobs_count += 1
             
-            if any(k in text.lower() for k in ["lisans", "kpss p3", "ziraat", "mühendis"]) and link not in sent_jobs:
-                send_telegram(f"🏛️ <b>SBB Kamu İlan</b>\n\n📌 {text}\n\n🔗 <a href='{link}'>İlan Linki</a>")
-                sent_jobs.add(link)
-                new_jobs_count += 1
-
-    # 2. Resmî Gazete
-    soup = scrape_site("https://www.resmigazete.gov.tr/", "Resmi Gazete")
-    if soup:
-        for a in soup.find_all("a", href=True):
-            text = a.get_text(strip=True)
-            link = a["href"]
-            if ("ilan" in link.lower() or "personel" in text.lower()) and any(k in text.lower() for k in ["lisans", "alımı", "personel"]):
-                if not link.startswith("http"):
-                    link = "https://www.resmigazete.gov.tr/" + link.lstrip("/")
-                if link not in sent_jobs:
-                    send_telegram(f"📜 <b>Resmî Gazete İlanı</b>\n\n📌 {text}\n\n🔗 <a href='{link}'>İlan Linki</a>")
-                    sent_jobs.add(link)
-                    new_jobs_count += 1
-
-    # 3. İlan.gov.tr (BİK)
-    soup = scrape_site("https://www.ilan.gov.tr/kategori/personel-alimi", "İlan.gov.tr")
-    if soup:
-        for a in soup.find_all("a", href=True):
-            text = a.get_text(strip=True)
-            link = a["href"]
-            if not link.startswith("http"):
-                link = "https://www.ilan.gov.tr" + link
-            if any(k in text.lower() for k in ["lisans", "memur", "personel"]) and link not in sent_jobs:
-                send_telegram(f"📢 <b>İlan.gov.tr</b>\n\n📌 {text}\n\n🔗 <a href='{link}'>İlan Linki</a>")
-                sent_jobs.add(link)
-                new_jobs_count += 1
-
-    # 4. Çevre ve Şehircilik Yerel Yönetimler
-    soup = scrape_site("https://yerelyonetimler.csb.gov.tr/", "Yerel Yönetimler")
-    if soup:
-        for a in soup.find_all("a", href=True):
-            text = a.get_text(strip=True)
-            link = a["href"]
-            if any(k in text.lower() for k in ["lisans", "alımı", "zabıta", "memur"]) and link not in sent_jobs:
-                if not link.startswith("http"):
-                    link = "https://yerelyonetimler.csb.gov.tr/" + link.lstrip("/")
-                send_telegram(f"🏢 <b>Yerel Yönetimler İlanı</b>\n\n📌 {text}\n\n🔗 <a href='{link}'>İlan Linki</a>")
-                sent_jobs.add(link)
-                new_jobs_count += 1
-
-    # 5. İŞKUR
-    soup = scrape_site("https://www.iskur.gov.tr/", "İŞKUR")
-    if soup:
-        for a in soup.find_all("a", href=True):
-            text = a.get_text(strip=True)
-            link = a["href"]
-            if ("kamu" in text.lower() or "lisans" in text.lower()) and link not in sent_jobs:
-                if not link.startswith("http"):
-                    link = "https://www.iskur.gov.tr/" + link.lstrip("/")
-                send_telegram(f"💼 <b>İŞKUR İlanı</b>\n\n📌 {text}\n\n🔗 <a href='{link}'>İlan Linki</a>")
-                sent_jobs.add(link)
-                new_jobs_count += 1
-
-    # 6. Kariyer Kapısı
-    soup = scrape_site("https://kariyerkapisi.gov.tr/isealim", "Kariyer Kapısı")
-    if soup:
-        for a in soup.find_all("a", href=True):
-            text = a.get_text(strip=True)
-            link = a["href"]
-            if any(k in text.lower() for k in ["lisans", "başvuru", "alim"]) and link not in sent_jobs:
-                if not link.startswith("http"):
-                    link = "https://kariyerkapisi.gov.tr" + link
-                send_telegram(f"🎯 <b>Kariyer Kapısı İlanı</b>\n\n📌 {text}\n\n🔗 <a href='{link}'>İlan Linki</a>")
-                sent_jobs.add(link)
-                new_jobs_count += 1
-
     save_sent_jobs(sent_jobs)
-    print(f"Tarama bitti. {new_jobs_count} yeni bildirim atıldı.")
+    print(f"Nokta atışı tarama bitti. {new_jobs_count} yeni gerçek ilan bildirildi.")
 
 if __name__ == "__main__":
     check_all_sources()
